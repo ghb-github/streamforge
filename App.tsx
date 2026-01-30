@@ -119,7 +119,9 @@ export default function App() {
 
       addLog('Starting conversion with timestamp correction...', LogType.INFO);
       
-      const mp4Data = await ffmpegService.convertTsToMp4(stitchedData);
+      const mp4Data = await ffmpegService.convertTsToMp4(stitchedData, (percent) => {
+        setProgress(p => ({ ...p, percent }));
+      });
       
       addLog('Conversion complete! Timeline corrected.', LogType.SUCCESS);
       
