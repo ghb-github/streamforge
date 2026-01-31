@@ -1,3 +1,4 @@
+
 import { resolveUrl } from '../utils/url';
 import { Segment, StreamInfo, EncryptionData } from '../types';
 
@@ -159,31 +160,61 @@ export class HLSDownloader {
 
       const batch = segments.slice(i, i + BATCH_SIZE);
       const promises = batch.map(async (seg) => {
-        try {
-          // 1. Fetch Data
-          const fetchUrl = useProxy ? `https://corsproxy.io/?${encodeURIComponent(seg.url)}` : seg.url;
-          const res = await fetch(fetchUrl, { signal });
-          if (!res.ok) throw new Error(`Failed to fetch segment ${seg.index}`);
-          const buffer = await res.arrayBuffer();
-          let data = new Uint8Array(buffer);
+        
+        // Retry logic loop
+        let attempts = 0;
+        const maxAttempts = 3;
+        
+        while (attempts < maxAttempts) {
+            try {
+                if (signal.aborted) throw new Error("Aborted");
 
-          // 2. Decrypt if needed
-          if (seg.encryption && seg.encryption.method === 'AES-128' && seg.encryption.uri) {
-            data = await this.decryptSegment(data, seg.encryption, seg.seqId || seg.index, useProxy);
-          }
+                // 1. Fetch Data
+                const fetchUrl = useProxy ? `https://corsproxy.io/?${encodeURIComponent(seg.url)}` : seg.url;
+                const res = await fetch(fetchUrl, { signal });
+                
+                if (!res.ok) {
+                    // Stop retrying on 4xx errors (likely permanent), retry 5xx
+                    if (res.status >= 400 && res.status < 500 && res.status !== 408 && res.status !== 429) {
+                         throw new Error(`HTTP ${res.status}`);
+                    }
+                    throw new Error(`HTTP ${res.status}`); // Throw to catch block for retry
+                }
+                
+                const buffer = await res.arrayBuffer();
+                let data = new Uint8Array(buffer);
 
-          results[seg.index] = data;
-          downloadedCount++;
-          onProgress(downloadedCount, segments.length);
-        } catch (error) {
-           if (!signal.aborted) {
-             console.error(`Error processing segment ${seg.index}:`, error);
-             throw error;
-           }
+                // 2. Decrypt if needed
+                if (seg.encryption && seg.encryption.method === 'AES-128' && seg.encryption.uri) {
+                    data = await this.decryptSegment(data, seg.encryption, seg.seqId || seg.index, useProxy);
+                }
+
+                results[seg.index] = data;
+                downloadedCount++;
+                onProgress(downloadedCount, segments.length);
+                break; // Success, exit retry loop
+
+            } catch (error: any) {
+                attempts++;
+                if (signal.aborted) throw error;
+                
+                if (attempts >= maxAttempts) {
+                    console.error(`Failed to download segment ${seg.index} after ${maxAttempts} attempts.`);
+                    throw error;
+                }
+                
+                // Exponential backoff: 500ms, 1000ms, 2000ms
+                const delay = 500 * Math.pow(2, attempts - 1);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
         }
       });
 
-      await Promise.all(promises);
+      try {
+        await Promise.all(promises);
+      } catch (error) {
+          if (!signal.aborted) throw error;
+      }
     }
 
     return results;

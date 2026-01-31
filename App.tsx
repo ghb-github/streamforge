@@ -1,15 +1,20 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+
+import React, { useState, useCallback, useRef } from 'react';
 import { Header } from './components/Header';
 import { Terminal } from './components/Terminal';
 import { ProgressBar } from './components/ProgressBar';
-import { LogMessage, LogType, DownloadProgress, Segment } from './types';
+import { VideoPlayer } from './components/VideoPlayer';
+import { LogMessage, LogType, DownloadProgress } from './types';
 import { HLSDownloader } from './services/downloader';
-import { FFmpegService } from './services/ffmpegService'; // Switched back to FFmpeg
+import { FFmpegService } from './services/ffmpegService';
+import { TransmuxerService } from './services/transmuxer';
 import { isValidUrl, getFilenameFromUrl } from './utils/url';
-import { Download, FileVideo, Video, AlertCircle, Settings2, Play, RefreshCw, StopCircle, Terminal as TerminalIcon, Copy, Check, Info, Lock, Unlock, HelpCircle, X, TerminalSquare, Laptop, Command, Zap } from 'lucide-react';
+import { Download, FileVideo, Video, AlertCircle, StopCircle, Check, Copy, Terminal as TerminalIcon, Info, HelpCircle, X, TerminalSquare, Laptop, Command as CommandIcon, PlayCircle } from 'lucide-react';
 
-// Use the robust FFmpeg service instead of mux.js
+// Use the robust FFmpeg service
 const ffmpegService = new FFmpegService();
+// Use lightweight Transmuxer for preview/fast convert
+const transmuxerService = new TransmuxerService();
 
 export default function App() {
   const [url, setUrl] = useState('');
@@ -25,6 +30,10 @@ export default function App() {
   const [copiedCmd, setCopiedCmd] = useState(false);
   const [conversionFailed, setConversionFailed] = useState(false);
   const [showInstallModal, setShowInstallModal] = useState(false);
+  
+  // Preview State
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [isPreviewing, setIsPreviewing] = useState(false);
   
   const downloaderRef = useRef<HLSDownloader>(new HLSDownloader());
 
@@ -43,13 +52,23 @@ export default function App() {
       return;
     }
 
+    if (!url.includes('.m3u8')) {
+        addLog('Invalid URL. Please provide a direct link to an HLS stream (.m3u8)', LogType.ERROR);
+        return;
+    }
+
     setStitchedData(null);
+    setPreviewUrl(null);
+    await executeDownload(url);
+  };
+
+  const executeDownload = async (targetUrl: string) => {
     setConversionFailed(false);
     setProgress({ phase: 'fetching_manifest', percent: 0, totalSegments: 0, downloadedSegments: 0 });
-    addLog(`Fetching manifest from: ${url}`, LogType.INFO);
+    addLog(`Fetching manifest from: ${targetUrl}`, LogType.INFO);
 
     try {
-      const { segments, info } = await downloaderRef.current.fetchManifest(url, useProxy);
+      const { segments, info } = await downloaderRef.current.fetchManifest(targetUrl, useProxy);
       
       addLog(`Manifest parsed. Found ${segments.length} segments. Duration: ~${(info.duration || 0).toFixed(1)}s`, LogType.SUCCESS);
       if (info.isEncrypted) {
@@ -103,6 +122,33 @@ export default function App() {
     addLog('File saved as .ts', LogType.SUCCESS);
   };
 
+  const handlePreview = async () => {
+    if (!stitchedData) return;
+    
+    setIsPreviewing(true);
+    addLog('Generating preview using Mux.js...', LogType.INFO);
+
+    try {
+        // Use the lightweight TransmuxerService for preview
+        const mp4Data = await transmuxerService.convertTsToMp4(stitchedData);
+        const blob = new Blob([mp4Data], { type: 'video/mp4' });
+        const previewBlobUrl = URL.createObjectURL(blob);
+        setPreviewUrl(previewBlobUrl);
+        addLog('Preview ready!', LogType.SUCCESS);
+    } catch (error: any) {
+        addLog(`Preview generation failed: ${error.message}. Try "Convert to .MP4" instead.`, LogType.ERROR);
+        setIsPreviewing(false);
+    }
+  };
+
+  const handleClosePreview = () => {
+    if (previewUrl) {
+        URL.revokeObjectURL(previewUrl);
+        setPreviewUrl(null);
+    }
+    setIsPreviewing(false);
+  };
+
   const handleConvertToMP4 = async () => {
     if (!stitchedData) return;
     
@@ -112,15 +158,14 @@ export default function App() {
 
     try {
       await ffmpegService.load((msg) => {
-         // Filter out verbose logs if needed
          if (msg.includes('frame=') || msg.includes('size=')) return;
          addLog(`[FFmpeg] ${msg}`, LogType.INFO);
       });
 
       addLog('Starting conversion with timestamp correction...', LogType.INFO);
       
-      const mp4Data = await ffmpegService.convertTsToMp4(stitchedData, (percent) => {
-        setProgress(p => ({ ...p, percent }));
+      const mp4Data = await ffmpegService.convertTsToMp4(stitchedData, (progress) => {
+        setProgress(p => ({ ...p, percent: progress }));
       });
       
       addLog('Conversion complete! Timeline corrected.', LogType.SUCCESS);
@@ -160,12 +205,16 @@ export default function App() {
 
   const isBusy = progress.phase === 'downloading' || progress.phase === 'converting' || progress.phase === 'stitching';
   const filename = getFilenameFromUrl(url, 'ts');
-  const outputName = filename.replace('.ts', '.mp4');
-  const ffmpegCommand = `ffmpeg -i "${filename}" -c copy -bsf:a aac_adtstoasc -avoid_negative_ts make_zero "${outputName}"`;
+  const ffmpegCommand = `ffmpeg -i "${filename}" -c copy -bsf:a aac_adtstoasc -avoid_negative_ts make_zero "${filename.replace('.ts', '.mp4')}"`;
 
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col">
       <Header />
+
+      {/* Video Preview Modal */}
+      {previewUrl && (
+        <VideoPlayer src={previewUrl} onClose={handleClosePreview} />
+      )}
       
       {/* Installation Guide Modal */}
       {showInstallModal && (
@@ -204,7 +253,7 @@ export default function App() {
                     {/* macOS */}
                     <div className="space-y-3">
                         <h3 className="text-zinc-200 font-semibold flex items-center gap-2">
-                            <Command className="w-4 h-4 text-zinc-200" /> macOS
+                            <CommandIcon className="w-4 h-4 text-zinc-200" /> macOS
                         </h3>
                         <div className="bg-zinc-950/50 rounded-lg p-4 border border-zinc-800/50">
                             <p className="text-sm text-zinc-400 mb-2">1. Open <b>Terminal</b>.</p>
@@ -245,13 +294,13 @@ export default function App() {
         {/* Input Section */}
         <section className="space-y-4">
           <div className="bg-zinc-900/50 p-6 rounded-2xl border border-zinc-800 shadow-xl relative overflow-hidden">
-            <label className="block text-sm font-medium text-zinc-300 mb-2">HLS Stream URL (.m3u8)</label>
+            <label className="block text-sm font-medium text-zinc-300 mb-2">Target HLS URL (.m3u8)</label>
             <div className="flex gap-4">
               <input
                 type="text"
                 value={url}
                 onChange={(e) => setUrl(e.target.value)}
-                placeholder="https://example.com/playlist.m3u8"
+                placeholder="https://example.com/stream/master.m3u8"
                 className="flex-1 bg-zinc-950 border border-zinc-700 rounded-xl px-4 py-3 text-zinc-200 placeholder-zinc-600 focus:outline-none focus:ring-2 focus:ring-blue-600/50 transition-all"
                 disabled={isBusy}
               />
@@ -267,7 +316,7 @@ export default function App() {
                 <button
                   onClick={handleDownload}
                   disabled={!url}
-                  className="bg-blue-600 hover:bg-blue-500 text-white px-6 rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg shadow-blue-900/20"
+                  className="bg-blue-600 hover:bg-blue-500 text-white px-6 rounded-xl font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 shadow-lg shadow-blue-900/20 min-w-[160px] justify-center"
                 >
                   <Download className="w-5 h-5" />
                   Fetch & Download
@@ -292,7 +341,7 @@ export default function App() {
                 </label>
                 <div className="flex items-center gap-1.5 text-xs text-zinc-500">
                     <AlertCircle className="w-4 h-4" />
-                    <span>Enable proxy if the download fails immediately due to CORS errors.</span>
+                    <span>Enable if the stream is blocked by CORS.</span>
                 </div>
             </div>
           </div>
@@ -309,7 +358,7 @@ export default function App() {
                         label={
                             progress.phase === 'downloading' ? 'Downloading Segments...' :
                             progress.phase === 'stitching' ? 'Stitching Segments...' :
-                            progress.phase === 'converting' ? 'Correcting Timestamps & Converting...' : 'Processing...'
+                            progress.phase === 'converting' ? 'Converting to MP4 (FFmpeg)...' : 'Processing...'
                         }
                         subLabel={
                             progress.phase === 'downloading' 
@@ -323,7 +372,22 @@ export default function App() {
                 {/* Download Actions */}
                 {stitchedData && progress.phase !== 'converting' && (
                     <div className="space-y-6">
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2">
+                             {/* Preview Button */}
+                             <button
+                                onClick={handlePreview}
+                                disabled={isPreviewing}
+                                className="flex items-center justify-center gap-3 p-4 rounded-xl border border-zinc-700 bg-zinc-800/50 hover:bg-zinc-800 transition-all hover:border-zinc-500 group"
+                            >
+                                <div className="w-10 h-10 rounded-full bg-zinc-700 flex items-center justify-center group-hover:bg-zinc-600 transition-colors">
+                                    <PlayCircle className="w-5 h-5 text-green-400" />
+                                </div>
+                                <div className="text-left">
+                                    <div className="text-sm font-semibold text-zinc-200">Preview</div>
+                                    <div className="text-xs text-zinc-500">Watch Now</div>
+                                </div>
+                            </button>
+
                             <button
                                 onClick={handleSaveTS}
                                 className="flex items-center justify-center gap-3 p-4 rounded-xl border border-zinc-700 bg-zinc-800/50 hover:bg-zinc-800 transition-all hover:border-zinc-600 group"
@@ -333,7 +397,7 @@ export default function App() {
                                 </div>
                                 <div className="text-left">
                                     <div className="text-sm font-semibold text-zinc-200">Save as .TS</div>
-                                    <div className="text-xs text-zinc-500">Raw MPEG-TS Stream</div>
+                                    <div className="text-xs text-zinc-500">Raw Stream</div>
                                 </div>
                             </button>
 
@@ -352,16 +416,15 @@ export default function App() {
                                 </div>
                                 <div className="text-left">
                                     <div className={`text-sm font-semibold ${conversionFailed ? 'text-red-300' : 'text-purple-200'}`}>
-                                        {conversionFailed ? 'Conversion Failed' : 'Convert to .MP4'}
+                                        {conversionFailed ? 'Failed' : 'Save .MP4'}
                                     </div>
                                     <div className={`text-xs ${conversionFailed ? 'text-red-400' : 'text-purple-400'}`}>
-                                        {conversionFailed ? 'Use manual command below' : 'Robust FFmpeg Engine'}
+                                        {conversionFailed ? 'Try Manual' : 'Convert'}
                                     </div>
                                 </div>
                             </button>
                         </div>
                         
-                        {/* Local FFmpeg Helper */}
                         <div className={`rounded-xl border p-5 flex flex-col gap-3 transition-colors duration-500
                             ${conversionFailed ? 'bg-red-950/20 border-red-500/30' : 'bg-zinc-950 border-zinc-800'}
                         `}>
@@ -397,15 +460,6 @@ export default function App() {
                                 >
                                     {copiedCmd ? <Check className="w-5 h-5 text-green-500" /> : <Copy className="w-5 h-5" />}
                                 </button>
-                            </div>
-                            
-                            <div className="flex gap-2 text-[10px] text-zinc-500 bg-zinc-900/50 p-2 rounded border border-zinc-800/50">
-                                <Info className="w-3 h-3 mt-0.5" />
-                                <ol className="list-decimal list-inside space-y-0.5">
-                                    <li>Click <b>Save as .TS</b> above.</li>
-                                    <li>Open your terminal/command prompt in the <b>Downloads</b> folder.</li>
-                                    <li>Paste and run the command above.</li>
-                                </ol>
                             </div>
                         </div>
                     </div>

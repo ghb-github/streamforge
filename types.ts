@@ -1,3 +1,4 @@
+
 export interface LogMessage {
   id: string;
   type: 'info' | 'success' | 'error' | 'warning';

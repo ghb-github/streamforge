@@ -1,20 +1,30 @@
+
 /**
  * Resolves a relative URL against a base URL.
  */
 export const resolveUrl = (baseUrl: string, relativeUrl: string): string => {
-  if (relativeUrl.startsWith('http://') || relativeUrl.startsWith('https://')) {
+  if (!relativeUrl) return '';
+
+  // 1. Already absolute HTTP/HTTPS
+  if (/^https?:\/\//i.test(relativeUrl)) {
     return relativeUrl;
   }
   
   try {
     const base = new URL(baseUrl);
-    // Handle cases where base URL is a file path (e.g., .../playlist.m3u8)
-    const basePath = base.pathname.substring(0, base.pathname.lastIndexOf('/') + 1);
     
-    // Construct absolute URL
-    return new URL(relativeUrl, base.origin + basePath).toString();
+    // 2. Protocol-relative URLs (e.g. //cdn.example.com/file.m3u8)
+    if (relativeUrl.startsWith('//')) {
+        return `${base.protocol}${relativeUrl}`;
+    }
+
+    // 3. Root-relative or Path-relative
+    // URL constructor handles:
+    // - "/path" against "http://site.com/sub/" -> "http://site.com/path"
+    // - "file" against "http://site.com/sub/" -> "http://site.com/sub/file"
+    return new URL(relativeUrl, base.href).toString();
   } catch (e) {
-    console.error('Error resolving URL:', e);
+    console.warn('Error resolving URL:', e);
     return relativeUrl;
   }
 };
