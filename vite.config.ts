@@ -12,6 +12,7 @@ export default defineConfig(({ mode }) => {
       plugins: [react()],
       base: '/streamforge/',
       define: {
+        'process.env.PUBLIC_URL': JSON.stringify('/streamforge/'),
         'process.env.API_KEY': JSON.stringify(env.GEMINI_API_KEY),
         'process.env.GEMINI_API_KEY': JSON.stringify(env.GEMINI_API_KEY)
       },
